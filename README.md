@@ -41,7 +41,7 @@ LanLink/
 
 整个 `LanLink` 文件夹复制到两台电脑即可，**不需要安装**。
 
-压缩包不放在仓库里，请到 [Releases](https://github.com/canfsys/LanLink/releases) 下载 `LanLink-v1.1.0.zip`。
+压缩包不放在仓库里，请到 [Releases](https://github.com/canfsys/LanLink/releases) 下载 `LanLink-v1.2.0.zip`。
 
 ---
 
@@ -147,6 +147,12 @@ D:\LanLink\
 | 断开连接 | 删除本次映射的盘符 |
 | 还原网络配置 | 如果做过直连静态 IP，点此恢复原配置 |
 | 网卡摘要 / 刷新网卡 | 显示当前使用的网卡；点刷新重新扫描 |
+
+### 窗口与日志区
+
+- 窗口可以自由拉大拉小（最小 880×660），控件自动伸缩：输入框、网卡下拉、列表区铺满窗口，右侧按钮和状态文字贴着右边界。
+- 上方角色面板和下方 **运行日志** 之间有一条横向分隔条，**按住拖动即可调整日志高度**；列表区会跟着让出或收回空间。
+- 窗口尺寸和日志高度会记录在 `%LOCALAPPDATA%\LanLink\settings.json`，下次启动恢复；换到更小的屏幕时会自动夹到可见范围内。
 
 ---
 
@@ -310,6 +316,7 @@ Remove-LocalUser -Name LanLink
 - v1.0.2：修复静态 IP 刚配置时处于 DAD `Tentative` 状态导致 `UdpClient.Bind` 失败（日志“请求的地址无效”）；Helper 现在等到地址 `Preferred` 才返回，客户端绑定增加最多 3 秒重试。
 - v1.0.3：客户端断开时主动通知主机；主机“停止共享”时查询真实 SMB 会话，避免客户端已断开仍提示“有一台电脑正在连接”。
 - v1.1.0：新增网卡刷新（主机/客户端）、历史电脑列表（记住勾选 + 垃圾桶删除）、默认记住已连接电脑开关；旧授权记录自动迁移。
+- v1.2.0：界面自适应窗口大小，新增可拖动的日志分隔条，记住窗口尺寸与日志高度；最小窗口 880×660；新增界面布局自检。
 
 验收步骤见 [`docs/验收清单.md`](docs/验收清单.md)，完整版本记录见 [`CHANGELOG.md`](CHANGELOG.md)。
 
@@ -327,7 +334,13 @@ Remove-LocalUser -Name LanLink
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/Test-LanLink.ps1
 ```
 
-自检只做语法检查、Helper 自检、发现协议回环测试和本地 IPC，不修改网卡/共享/防火墙。测试数据默认写入仓库内的 `.testdata`、`.teststate`（已被忽略）；如果目录只读，可以指定临时目录：
+自检只做语法检查、Helper 自检、界面布局自检、发现协议回环测试和本地 IPC，不修改网卡/共享/防火墙。界面布局自检也可以单独运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File LanLink.ps1 -LayoutTest
+```
+
+它会在不显示窗口的情况下按 4 种尺寸检查控件是否重叠/越界，并验证日志分隔条与列表区的联动。测试数据默认写入仓库内的 `.testdata`、`.teststate`（已被忽略）；如果目录只读，可以指定临时目录：
 
 ```powershell
 $env:LANLINK_TEST_DATA_DIR  = "$env:TEMP\LanLinkData"
@@ -337,7 +350,7 @@ $env:LANLINK_TEST_STATE_DIR = "$env:TEMP\LanLinkState"
 ### 打包
 
 ```powershell
-Compress-Archive -Path .\LanLink -DestinationPath .\LanLink-v1.1.0.zip
+Compress-Archive -Path .\LanLink -DestinationPath .\LanLink-v1.2.0.zip
 ```
 
 ### 文件编码约定

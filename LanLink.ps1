@@ -16,12 +16,13 @@ param(
     [switch]$DryRun,
     [switch]$Json,
     [string]$ClientName = '',
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    [switch]$LayoutTest
 )
 
 $ErrorActionPreference = 'Stop'
 $script:AppName = 'LanLink'
-$script:AppVersion = '1.1.0'
+$script:AppVersion = '1.2.0'
 $script:AppRoot = $PSScriptRoot
 if (-not $script:AppRoot) {
     $script:AppRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -365,6 +366,9 @@ function Save-Settings {
         adapterName     = $adapter
         readOnly        = [bool]$script:ChkReadOnly.Checked
         defaultRemember = $(if ($script:ChkDefaultRemember) { [bool]$script:ChkDefaultRemember.Checked } else { [bool]$script:DefaultRememberClients })
+        logHeight       = $(if ($script:SplitMain) { Get-LogPanelHeight } else { 0 })
+        windowWidth     = $(if ($script:Form) { [int]$script:Form.Width } else { 0 })
+        windowHeight    = $(if ($script:Form) { [int]$script:Form.Height } else { 0 })
     }
     try {
         $settings | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $script:SettingsPath -Encoding UTF8
@@ -1297,6 +1301,50 @@ function Scale-ControlFonts {
     }
 }
 
+# 日志区高度（Panel2 的像素高度），用于保存/恢复分隔条位置
+function Get-LogPanelHeight {
+    if (-not $script:SplitMain) {
+        return 0
+    }
+    try {
+        return [int]$script:SplitMain.Panel2.Height
+    } catch {
+        return 0
+    }
+}
+
+# 把日志区高度设置为 Height，自动夹在分隔容器的上下限内
+function Set-LogPanelHeight {
+    param([int]$Height = 122)
+    if (-not $script:SplitMain) {
+        return
+    }
+    $split = $script:SplitMain
+    try {
+        $total = [int]$split.Height
+        if ($total -le 0) {
+            return
+        }
+        $panel1Min = [int]$split.Panel1MinSize
+        $panel1Max = $total - [int]$split.Panel2MinSize - [int]$split.SplitterWidth
+        if ($panel1Max -lt 0) {
+            return
+        }
+        $distance = $total - $Height - [int]$split.SplitterWidth
+        if ($distance -lt $panel1Min) {
+            $distance = $panel1Min
+        }
+        if ($distance -gt $panel1Max) {
+            $distance = $panel1Max
+        }
+        if ($distance -ge 0) {
+            $split.SplitterDistance = $distance
+        }
+    } catch {
+        Write-AppLog "调整日志区高度失败: $($_.Exception.Message)" 'WARN'
+    }
+}
+
 function Set-Role {
     param([string]$SelectedRole)
     $script:Role = $SelectedRole
@@ -2116,7 +2164,7 @@ function Restore-ClientAction {
     }
 }
 
-function Initialize-Ui {
+function New-MainWindow {
     Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
     Add-Type -AssemblyName System.Drawing -ErrorAction Stop
     [System.Windows.Forms.Application]::EnableVisualStyles()
@@ -2125,16 +2173,21 @@ function Initialize-Ui {
     $form = New-Object System.Windows.Forms.Form
     $form.Text = '双机快传 LanLink'
     $form.ClientSize = New-Object System.Drawing.Size(880, 640)
-    $form.MinimumSize = New-Object System.Drawing.Size(800, 590)
+    # 最小尺寸要保证内容区高度 ≥ 分隔容器两组最小高度之和，否则 SplitContainer 无法布局
+    $form.MinimumSize = New-Object System.Drawing.Size(880, 660)
     $form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
     $form.Location = New-Object System.Drawing.Point(20, 20)
     $form.BackColor = [System.Drawing.ColorTranslator]::FromHtml('#F1F5F9')
     $form.Font = New-UiFont -Size 9
     $script:Form = $form
+    # 初始化期间的布局事件（分隔条等）不应写回设置文件，等 Shown 里读取完再放开
+    $script:SuppressSaveSettings = $true
 
     $header = New-Object System.Windows.Forms.Panel
     $header.Dock = [System.Windows.Forms.DockStyle]::Top
     $header.Height = 84
+    # 先给出设计宽度，子控件锚点才按 880 宽记录右边界
+    $header.Width = 880
     $header.BackColor = [System.Drawing.ColorTranslator]::FromHtml('#0F172A')
 
     $title = New-UiLabel -Text '双机快传 LanLink' -X 20 -Y 12 -W 420 -H 38 -Size 19 -Bold $true -Color '#FFFFFF'
@@ -2142,22 +2195,43 @@ function Initialize-Ui {
     $subtitle = New-UiLabel -Text '局域网 / 网线直连 · 一键共享与传输' -X 22 -Y 50 -W 460 -H 24 -Size 9 -Color '#93C5FD'
     $header.Controls.Add($subtitle)
     $script:LblHeaderStatus = New-UiLabel -Text '就绪' -X 600 -Y 22 -W 250 -H 32 -Size 10 -Bold $true -Color '#93C5FD' -Align 'MiddleRight'
+    $script:LblHeaderStatus.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
     $header.Controls.Add($script:LblHeaderStatus)
 
     $rolePanel = New-Object System.Windows.Forms.Panel
     $rolePanel.Dock = [System.Windows.Forms.DockStyle]::Top
     $rolePanel.Height = 82
+    $rolePanel.Width = 880
     $rolePanel.BackColor = [System.Drawing.ColorTranslator]::FromHtml('#F8FAFC')
 
     $script:BtnRoleHost = New-UiButton -Text '① 作为主机：共享文件夹' -X 16 -Y 12 -W 416 -H 58 -BackColor '#2563EB' -ForeColor '#FFFFFF' -Size 12
     $script:BtnRoleClient = New-UiButton -Text '② 作为客户端：连接主机' -X 448 -Y 12 -W 416 -H 58 -BackColor '#DCFCE7' -ForeColor '#166534' -Size 12
+    # 主机按钮向左拉伸、客户端按钮贴右，窗口变宽时两个按钮等比占据整行且不会重叠
+    $script:BtnRoleHost.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+    $script:BtnRoleClient.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
     $rolePanel.Controls.Add($script:BtnRoleHost)
     $rolePanel.Controls.Add($script:BtnRoleClient)
 
     $content = New-Object System.Windows.Forms.Panel
     $content.Dock = [System.Windows.Forms.DockStyle]::Fill
-    $content.AutoScroll = $true
+    $content.AutoScroll = $false
     $content.BackColor = [System.Drawing.ColorTranslator]::FromHtml('#F1F5F9')
+
+    # 上方角色面板 + 下方运行日志，中间分隔条可拖动（日志高度可调）
+    $script:SplitMain = New-Object System.Windows.Forms.SplitContainer
+    $script:SplitMain.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $script:SplitMain.Orientation = [System.Windows.Forms.Orientation]::Horizontal
+    $script:SplitMain.BorderStyle = [System.Windows.Forms.BorderStyle]::None
+    $script:SplitMain.SplitterWidth = 6
+    # 两组最小高度之和（280+88+6=374）必须小于最小窗口下的内容区高度，否则布局会失效
+    $script:SplitMain.Panel1MinSize = 280
+    $script:SplitMain.Panel2MinSize = 88
+    # 只固定下方日志区：窗口变高时由上方列表/明细区吸收空间
+    $script:SplitMain.FixedPanel = [System.Windows.Forms.FixedPanel]::Panel2
+    $script:SplitMain.Panel1.Padding = New-Object System.Windows.Forms.Padding(12, 8, 12, 2)
+    $script:SplitMain.Panel2.Padding = New-Object System.Windows.Forms.Padding(12, 2, 12, 10)
+    $script:SplitMain.Size = New-Object System.Drawing.Size(864, 452)
+    $content.Controls.Add($script:SplitMain)
 
     # 主机面板
     $hostPanel = New-Object System.Windows.Forms.GroupBox
@@ -2167,7 +2241,7 @@ function Initialize-Ui {
     $hostPanel.Font = New-UiFont -Size 10 -Bold $true
     $hostPanel.ForeColor = [System.Drawing.ColorTranslator]::FromHtml('#1E293B')
     $hostPanel.BackColor = [System.Drawing.ColorTranslator]::FromHtml('#FFFFFF')
-    $content.Controls.Add($hostPanel)
+    $script:SplitMain.Panel1.Controls.Add($hostPanel)
     $script:HostPanel = $hostPanel
 
     $hostPanel.Controls.Add((New-UiLabel -Text '共享文件夹' -X 18 -Y 32 -W 88 -H 28 -Size 9 -Color '#334155'))
@@ -2176,9 +2250,11 @@ function Initialize-Ui {
     $script:TxtSharePath.Size = New-Object System.Drawing.Size(560, 30)
     $script:TxtSharePath.Font = New-UiFont -Size 9
     $script:TxtSharePath.Text = $script:DefaultSharePath
+    $script:TxtSharePath.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
     $hostPanel.Controls.Add($script:TxtSharePath)
 
     $script:BtnBrowse = New-UiButton -Text '浏览...' -X 682 -Y 26 -W 130 -H 32 -BackColor '#E2E8F0' -ForeColor '#334155' -Size 9 -Bold $false
+    $script:BtnBrowse.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
     $hostPanel.Controls.Add($script:BtnBrowse)
 
     $hostPanel.Controls.Add((New-UiLabel -Text '连接方式' -X 18 -Y 76 -W 88 -H 28 -Size 9 -Color '#334155'))
@@ -2199,9 +2275,11 @@ function Initialize-Ui {
     $script:AdapterCombo.Size = New-Object System.Drawing.Size(355, 30)
     $script:AdapterCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
     $script:AdapterCombo.Font = New-UiFont -Size 9
+    $script:AdapterCombo.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
     $hostPanel.Controls.Add($script:AdapterCombo)
 
     $script:BtnRefreshAdapters = New-UiButton -Text '刷新网卡' -X 720 -Y 72 -W 90 -H 30 -BackColor '#E2E8F0' -ForeColor '#334155' -Size 8 -Bold $false
+    $script:BtnRefreshAdapters.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
     $hostPanel.Controls.Add($script:BtnRefreshAdapters)
 
     $script:ChkReadOnly = New-Object System.Windows.Forms.CheckBox
@@ -2222,6 +2300,7 @@ function Initialize-Ui {
     $hostPanel.Controls.Add($script:ChkDefaultRemember)
 
     $script:LblDefaultRememberHint = New-UiLabel -Text '仅影响之后连接' -X 615 -Y 112 -W 190 -H 22 -Size 8 -Color '#94A3B8'
+    $script:LblDefaultRememberHint.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
     $hostPanel.Controls.Add($script:LblDefaultRememberHint)
 
     $script:DefaultRememberTip = New-Object System.Windows.Forms.ToolTip
@@ -2237,12 +2316,16 @@ function Initialize-Ui {
     $hostPanel.Controls.Add($script:BtnStopHost)
 
     $script:LblHostStatus = New-UiLabel -Text '未启动' -X 525 -Y 152 -W 285 -H 30 -Size 9 -Color '#64748B'
+    $script:LblHostStatus.AutoEllipsis = $true
+    $script:LblHostStatus.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
     $hostPanel.Controls.Add($script:LblHostStatus)
 
     $script:ClientTabs = New-Object System.Windows.Forms.TabControl
     $script:ClientTabs.Location = New-Object System.Drawing.Point(18, 192)
     $script:ClientTabs.Size = New-Object System.Drawing.Size(787, 116)
     $script:ClientTabs.Font = New-UiFont -Size 9
+    # 已连接/历史列表区随窗口高度伸缩（底部边距固定，日志分隔条拖动时同步变化）
+    $script:ClientTabs.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 
     $connectedTab = New-Object System.Windows.Forms.TabPage
     $connectedTab.Text = '已连接'
@@ -2337,13 +2420,16 @@ function Initialize-Ui {
     $script:HistoryDeleteColumn = 5
     $script:HistoryTab.Controls.Add($script:HistoryGrid)
 
-    $script:LblHistoryEmpty = New-UiLabel -Text '暂无历史电脑，连接一次后会自动出现' -X 140 -Y 40 -W 470 -H 26 -Size 9 -Color '#94A3B8' -Align 'MiddleCenter'
+    $script:LblHistoryEmpty = New-UiLabel -Text '暂无历史电脑，连接一次后会自动出现' -X 0 -Y 0 -W 470 -H 26 -Size 9 -Color '#94A3B8' -Align 'MiddleCenter'
+    $script:LblHistoryEmpty.Dock = [System.Windows.Forms.DockStyle]::Fill
     $script:LblHistoryEmpty.BackColor = [System.Drawing.Color]::White
     $script:HistoryTab.Controls.Add($script:LblHistoryEmpty)
     $script:LblHistoryEmpty.BringToFront()
 
     [void]$script:ClientTabs.TabPages.Add($script:HistoryTab)
     $hostPanel.Controls.Add($script:ClientTabs)
+    # 子控件锚点已按 832x318 设计尺寸记录，最后再铺满容器
+    $hostPanel.Dock = [System.Windows.Forms.DockStyle]::Fill
 
     # 客户端面板
     $clientPanel = New-Object System.Windows.Forms.GroupBox
@@ -2354,7 +2440,7 @@ function Initialize-Ui {
     $clientPanel.ForeColor = [System.Drawing.ColorTranslator]::FromHtml('#1E293B')
     $clientPanel.BackColor = [System.Drawing.ColorTranslator]::FromHtml('#FFFFFF')
     $clientPanel.Visible = $false
-    $content.Controls.Add($clientPanel)
+    $script:SplitMain.Panel1.Controls.Add($clientPanel)
     $script:ClientPanel = $clientPanel
 
     $script:BtnSearch = New-UiButton -Text '搜索主机' -X 18 -Y 28 -W 140 -H 36 -BackColor '#16A34A' -ForeColor '#FFFFFF' -Size 10
@@ -2371,13 +2457,16 @@ function Initialize-Ui {
 
     $script:LblClientAdapter = New-UiLabel -Text '网卡：未检测到' -X 560 -Y 34 -W 130 -H 26 -Size 8 -Color '#64748B'
     $script:LblClientAdapter.AutoEllipsis = $true
+    $script:LblClientAdapter.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
     $clientPanel.Controls.Add($script:LblClientAdapter)
     $script:BtnRefreshClientAdapters = New-UiButton -Text '刷新网卡' -X 700 -Y 30 -W 110 -H 34 -BackColor '#E2E8F0' -ForeColor '#334155' -Size 9 -Bold $false
+    $script:BtnRefreshClientAdapters.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
     $clientPanel.Controls.Add($script:BtnRefreshClientAdapters)
 
     $script:HostList = New-Object System.Windows.Forms.ListView
     $script:HostList.Location = New-Object System.Drawing.Point(18, 78)
     $script:HostList.Size = New-Object System.Drawing.Size(795, 150)
+    $script:HostList.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
     $script:HostList.View = [System.Windows.Forms.View]::Details
     $script:HostList.FullRowSelect = $true
     $script:HostList.GridLines = $false
@@ -2388,15 +2477,21 @@ function Initialize-Ui {
     $clientPanel.Controls.Add($script:HostList)
 
     $script:BtnConnect = New-UiButton -Text '连接选中主机' -X 18 -Y 242 -W 170 -H 40 -BackColor '#16A34A' -ForeColor '#FFFFFF' -Size 10
+    $script:BtnConnect.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
     $script:BtnDisconnect = New-UiButton -Text '断开连接' -X 200 -Y 242 -W 170 -H 40 -BackColor '#FEE2E2' -ForeColor '#B91C1C' -Size 10
     $script:BtnDisconnect.Enabled = $false
+    $script:BtnDisconnect.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
     $script:BtnRestoreClient = New-UiButton -Text '还原网络配置' -X 382 -Y 242 -W 170 -H 40 -BackColor '#E2E8F0' -ForeColor '#334155' -Size 10
+    $script:BtnRestoreClient.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
     $clientPanel.Controls.Add($script:BtnConnect)
     $clientPanel.Controls.Add($script:BtnDisconnect)
     $clientPanel.Controls.Add($script:BtnRestoreClient)
 
     $script:LblClientStatus = New-UiLabel -Text '未连接' -X 570 -Y 248 -W 240 -H 30 -Size 9 -Color '#64748B'
+    $script:LblClientStatus.AutoEllipsis = $true
+    $script:LblClientStatus.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
     $clientPanel.Controls.Add($script:LblClientStatus)
+    $clientPanel.Dock = [System.Windows.Forms.DockStyle]::Fill
 
     # 日志
     $logGroup = New-Object System.Windows.Forms.GroupBox
@@ -2406,7 +2501,7 @@ function Initialize-Ui {
     $logGroup.Font = New-UiFont -Size 10 -Bold $true
     $logGroup.ForeColor = [System.Drawing.ColorTranslator]::FromHtml('#1E293B')
     $logGroup.BackColor = [System.Drawing.ColorTranslator]::FromHtml('#FFFFFF')
-    $content.Controls.Add($logGroup)
+    $script:SplitMain.Panel2.Controls.Add($logGroup)
 
     $script:LogBox = New-Object System.Windows.Forms.TextBox
     $script:LogBox.Location = New-Object System.Drawing.Point(12, 24)
@@ -2419,6 +2514,7 @@ function Initialize-Ui {
     $script:LogBox.ForeColor = [System.Drawing.ColorTranslator]::FromHtml('#E2E8F0')
     $script:LogBox.Font = New-Object System.Drawing.Font('Consolas', 8.5)
     $logGroup.Controls.Add($script:LogBox)
+    $logGroup.Dock = [System.Windows.Forms.DockStyle]::Fill
 
     $statusStrip = New-Object System.Windows.Forms.StatusStrip
     $statusStrip.BackColor = [System.Drawing.ColorTranslator]::FromHtml('#E2E8F0')
@@ -2506,6 +2602,7 @@ function Initialize-Ui {
         })
 
     $script:ModeCombo.Add_SelectedIndexChanged({ Save-Settings })
+    $script:SplitMain.Add_SplitterMoved({ Save-Settings })
     $script:AdapterCombo.Add_SelectedIndexChanged({
             Update-AdapterSummary
             Save-Settings
@@ -2558,6 +2655,33 @@ function Initialize-Ui {
                 $script:ChkDefaultRemember.Checked = [bool]$RememberClients
                 $script:DefaultRememberClients = [bool]$RememberClients
             }
+            # 恢复上次的窗口尺寸与日志区高度
+            if ($settings -and $settings.PSObject.Properties['windowWidth'] -and $settings.PSObject.Properties['windowHeight']) {
+                try {
+                    $savedWidth = [int]$settings.windowWidth
+                    $savedHeight = [int]$settings.windowHeight
+                    if ($savedWidth -gt 0 -and $savedHeight -gt 0) {
+                        $working = [System.Windows.Forms.Screen]::FromControl($script:Form).WorkingArea
+                        $minWidth = [int]$script:Form.MinimumSize.Width
+                        $minHeight = [int]$script:Form.MinimumSize.Height
+                        $maxWidth = [math]::Max($minWidth, $working.Width - 20)
+                        $maxHeight = [math]::Max($minHeight, $working.Height - 40)
+                        $savedWidth = [math]::Min([math]::Max($savedWidth, $minWidth), $maxWidth)
+                        $savedHeight = [math]::Min([math]::Max($savedHeight, $minHeight), $maxHeight)
+                        $script:Form.Size = New-Object System.Drawing.Size($savedWidth, $savedHeight)
+                    }
+                } catch {
+                }
+            }
+            $script:Form.PerformLayout()
+            $restoreLogHeight = 122
+            if ($settings -and $settings.PSObject.Properties['logHeight']) {
+                $savedLogHeight = [int]$settings.logHeight
+                if ($savedLogHeight -gt 0) {
+                    $restoreLogHeight = $savedLogHeight
+                }
+            }
+            Set-LogPanelHeight -Height $restoreLogHeight
             $script:SuppressSaveSettings = $false
             Save-Settings
             Update-AdapterSummary
@@ -2592,6 +2716,10 @@ function Initialize-Ui {
 
     $form.Add_FormClosing({
             param($sender, $eventArgs)
+            try {
+                Save-Settings
+            } catch {
+            }
             if ($script:HostRunning) {
                 $answer = [System.Windows.Forms.MessageBox]::Show(
                     '共享仍在进行。关闭窗口前是否停止共享并还原网络配置？',
@@ -2649,6 +2777,11 @@ function Initialize-Ui {
 
     $startRole = if ($env:LANLINK_START_ROLE -eq 'Client') { 'Client' } else { 'Host' }
     Set-Role -SelectedRole $startRole
+    return $form
+}
+
+function Initialize-Ui {
+    $form = New-MainWindow
     [void]$form.ShowDialog()
     if ($script:UiTimer) {
         $script:UiTimer.Stop()
@@ -2995,6 +3128,160 @@ function Run-Cli {
 # 入口
 # ---------------------------------------------------------------------------
 
+# 布局自检：不显示窗口，直接按不同尺寸触发布局并检查控件边界/重叠关系。
+function Invoke-LayoutSelfTest {
+    $failures = New-Object System.Collections.ArrayList
+    $form = $null
+    $originalSuppress = $script:SuppressSaveSettings
+
+    function Test-LayoutCondition {
+        param([bool]$Condition, [string]$Message)
+        if (-not $Condition) {
+            [void]$failures.Add($Message)
+        }
+    }
+
+    # Control.Visible 会连带父级（窗口未显示时恒为 false），这里只取控件自身的可见状态
+    function Get-OwnVisible {
+        param($Control)
+        try {
+            $method = $Control.GetType().GetMethod('GetState', [System.Reflection.BindingFlags]'NonPublic, Instance')
+            if ($method) {
+                return [bool]$method.Invoke($Control, @(2))
+            }
+        } catch {
+        }
+        return $false
+    }
+
+    try {
+        $script:SuppressSaveSettings = $true
+        $form = New-MainWindow
+        $split = $script:SplitMain
+        $hostPanel = $script:HostPanel
+        $clientPanel = $script:ClientPanel
+        if (-not $form -or -not $split -or -not $hostPanel -or -not $clientPanel) {
+            [void]$failures.Add('主窗口或分隔容器未创建')
+        } else {
+            $sizes = @(
+                @{ w = 880; h = 660 },
+                @{ w = 880; h = 700 },
+                @{ w = 1200; h = 800 },
+                @{ w = 1600; h = 1000 }
+            )
+            foreach ($size in $sizes) {
+                $tag = "$($size.w)x$($size.h)"
+                $form.ClientSize = New-Object System.Drawing.Size($size.w, $size.h)
+                $form.PerformLayout()
+
+                # 顶部标题栏与角色切换按钮
+                Test-LayoutCondition ($script:LblHeaderStatus.Right -le $form.ClientSize.Width) "$tag 标题栏状态文字超出窗口右边界"
+                Test-LayoutCondition ($script:BtnRoleHost.Left -ge 8) "$tag 主机角色按钮越出左边界"
+                Test-LayoutCondition ($script:BtnRoleHost.Right -le $script:BtnRoleClient.Left) "$tag 两个角色按钮重叠"
+                Test-LayoutCondition ($script:BtnRoleClient.Right -le $form.ClientSize.Width - 8) "$tag 客户端角色按钮越出右边界"
+                Test-LayoutCondition ($script:BtnRoleClient.Width -ge 300) "$tag 客户端角色按钮过窄：$($script:BtnRoleClient.Width)"
+
+                Set-Role -SelectedRole 'Host'
+                $form.PerformLayout()
+                Test-LayoutCondition (Get-OwnVisible $hostPanel) "$tag 主机面板应可见"
+                Test-LayoutCondition (-not (Get-OwnVisible $clientPanel)) "$tag 客户端面板不应同时可见"
+                Test-LayoutCondition ($hostPanel.ClientSize.Width -ge 800) "$tag 主机面板宽度不足：$($hostPanel.ClientSize.Width)"
+                Test-LayoutCondition ($script:TxtSharePath.Width -ge 400) "$tag 共享路径输入框过窄：$($script:TxtSharePath.Width)"
+                Test-LayoutCondition ($script:TxtSharePath.Right -le $script:BtnBrowse.Left) "$tag 共享路径输入框与浏览按钮重叠"
+                Test-LayoutCondition ($script:BtnBrowse.Right -le $hostPanel.ClientSize.Width) "$tag 浏览按钮超出面板右边界"
+                Test-LayoutCondition ($script:AdapterCombo.Width -ge 260) "$tag 网卡下拉框过窄：$($script:AdapterCombo.Width)"
+                Test-LayoutCondition ($script:AdapterCombo.Right -le $script:BtnRefreshAdapters.Left) "$tag 网卡下拉框与刷新按钮重叠"
+                Test-LayoutCondition ($script:BtnRefreshAdapters.Right -le $hostPanel.ClientSize.Width) "$tag 刷新网卡按钮超出面板右边界"
+                Test-LayoutCondition ($script:BtnStartHost.Right -le $script:BtnStopHost.Left) "$tag 启动/停止按钮重叠"
+                Test-LayoutCondition ($script:LblHostStatus.Left -ge $script:BtnStopHost.Right) "$tag 主机状态标签与停止按钮重叠"
+                Test-LayoutCondition ($script:LblHostStatus.Right -le $hostPanel.ClientSize.Width) "$tag 主机状态标签超出面板右边界"
+                Test-LayoutCondition ($script:ClientTabs.Height -ge 70) "$tag 已连接/历史列表区过矮：$($script:ClientTabs.Height)"
+                Test-LayoutCondition ($script:ClientTabs.Bottom -le $hostPanel.ClientSize.Height - 2) "$tag 列表区超出主机面板下边界"
+                Test-LayoutCondition ($script:ClientTabs.Right -le $hostPanel.ClientSize.Width - 2) "$tag 列表区超出主机面板右边界"
+                Test-LayoutCondition ($split.Panel2.Height -ge 88) "$tag 日志区过矮：$($split.Panel2.Height)"
+
+                Set-Role -SelectedRole 'Client'
+                $form.PerformLayout()
+                Test-LayoutCondition (Get-OwnVisible $clientPanel) "$tag 客户端面板应可见"
+                Test-LayoutCondition (-not (Get-OwnVisible $hostPanel)) "$tag 主机面板不应同时可见"
+                Test-LayoutCondition ($script:HostList.Height -ge 100) "$tag 主机列表过矮：$($script:HostList.Height)"
+                Test-LayoutCondition ($script:BtnConnect.Top -ge $script:HostList.Bottom) "$tag 主机列表与连接按钮重叠"
+                Test-LayoutCondition ($script:BtnConnect.Right -le $script:BtnDisconnect.Left) "$tag 连接/断开按钮重叠"
+                Test-LayoutCondition ($script:BtnDisconnect.Right -le $script:BtnRestoreClient.Left) "$tag 断开/还原按钮重叠"
+                Test-LayoutCondition ($script:LblClientAdapter.Left -ge $script:BtnManualConnect.Right) "$tag 网卡摘要与连接按钮重叠"
+                Test-LayoutCondition ($script:LblClientAdapter.Right -le $script:BtnRefreshClientAdapters.Left) "$tag 网卡摘要与刷新按钮重叠"
+                Test-LayoutCondition ($script:BtnRefreshClientAdapters.Right -le $clientPanel.ClientSize.Width) "$tag 客户端刷新按钮超出面板右边界"
+                Test-LayoutCondition ($script:LblClientStatus.Left -ge $script:BtnRestoreClient.Right) "$tag 客户端状态标签与还原按钮重叠"
+                Test-LayoutCondition ($script:LblClientStatus.Right -le $clientPanel.ClientSize.Width) "$tag 客户端状态标签超出面板右边界"
+                Test-LayoutCondition ($script:BtnRestoreClient.Bottom -le $clientPanel.ClientSize.Height) "$tag 客户端按钮超出面板下边界"
+            }
+
+            # 先放大再缩小：分隔容器与内部面板必须同步收缩（回归：曾出现缩小后子面板仍保持旧尺寸）
+            Set-Role -SelectedRole 'Host'
+            $form.ClientSize = New-Object System.Drawing.Size(1400, 1000)
+            $form.PerformLayout()
+            $form.ClientSize = New-Object System.Drawing.Size(880, 660)
+            $form.PerformLayout()
+            Test-LayoutCondition ($split.Panel1.Height -ge 280) "缩小后上方面板高度异常：$($split.Panel1.Height)"
+            Test-LayoutCondition ($split.Panel2.Height -ge 88) "缩小后日志区被压扁：$($split.Panel2.Height)"
+            Test-LayoutCondition ($hostPanel.Height -le $split.Panel1.Height) "缩小后主机面板未随容器收缩：$($hostPanel.Height)"
+            Test-LayoutCondition ($hostPanel.Width -le $split.Panel1.Width) "缩小后主机面板未随容器收缩：$($hostPanel.Width)"
+            Test-LayoutCondition ($script:ClientTabs.Bottom -le $hostPanel.ClientSize.Height - 2) "缩小后列表区超出主机面板"
+
+            # 日志区高度可调，且列表区随之变化
+            $form.ClientSize = New-Object System.Drawing.Size(1200, 900)
+            $form.PerformLayout()
+            Set-Role -SelectedRole 'Host'
+            $form.PerformLayout()
+            $tabsBase = $script:ClientTabs.Height
+            Set-LogPanelHeight -Height 260
+            $form.PerformLayout()
+            $logTall = $script:LogBox.Height
+            $tabsAfterTallLog = $script:ClientTabs.Height
+            Set-LogPanelHeight -Height 122
+            $form.PerformLayout()
+            $logShort = $script:LogBox.Height
+            Test-LayoutCondition ($logTall -gt $logShort + 100) "日志区高度调整无效：高=$logTall 矮=$logShort"
+            Test-LayoutCondition ($tabsAfterTallLog -lt $tabsBase) "日志区变高后列表区高度未同步变小"
+
+            # 窗口变高时列表区应吸收空间，日志区高度基本不变
+            Set-LogPanelHeight -Height 122
+            $form.ClientSize = New-Object System.Drawing.Size(1200, 900)
+            $form.PerformLayout()
+            $tabsSmall = $script:ClientTabs.Height
+            $logSmall = $split.Panel2.Height
+            $form.ClientSize = New-Object System.Drawing.Size(1200, 1100)
+            $form.PerformLayout()
+            $tabsLarge = $script:ClientTabs.Height
+            $logLarge = $split.Panel2.Height
+            Test-LayoutCondition ($tabsLarge -gt $tabsSmall + 100) "窗口变高后列表区未自适应：$tabsSmall -> $tabsLarge"
+            Test-LayoutCondition ([math]::Abs($logLarge - $logSmall) -le 8) "窗口变高后日志区高度漂移：$logSmall -> $logLarge"
+
+            # 窗口变宽时列表区应横向铺满
+            $form.ClientSize = New-Object System.Drawing.Size(900, 800)
+            $form.PerformLayout()
+            $tabsNarrow = $script:ClientTabs.Width
+            $form.ClientSize = New-Object System.Drawing.Size(1400, 800)
+            $form.PerformLayout()
+            $tabsWide = $script:ClientTabs.Width
+            Test-LayoutCondition ($tabsWide -gt $tabsNarrow + 400) "窗口变宽后列表区未自适应：$tabsNarrow -> $tabsWide"
+        }
+    } catch {
+        [void]$failures.Add("布局自检异常：$($_.Exception.Message)")
+    } finally {
+        $script:SuppressSaveSettings = $originalSuppress
+        if ($form) {
+            try { $form.Dispose() } catch { }
+        }
+    }
+
+    if ($failures.Count -gt 0) {
+        $failures | ForEach-Object { Write-Host "FAIL: $_" -ForegroundColor Red }
+        exit 1
+    }
+    Write-Host 'LAYOUT SELFTEST OK'
+}
+
 function Invoke-AppSelfTest {
     $failures = New-Object System.Collections.ArrayList
 
@@ -3104,6 +3391,11 @@ function Invoke-AppSelfTest {
         exit 1
     }
     Write-Host "SELFTEST OK (adapters=$(@($adapters).Count), drive=$driveLetter, admin=$(Test-Admin))"
+}
+
+if ($LayoutTest) {
+    Invoke-LayoutSelfTest
+    return
 }
 
 if ($SelfTest) {

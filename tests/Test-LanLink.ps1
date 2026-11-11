@@ -97,6 +97,7 @@ Test-ScriptSyntax -Path $script:Helper
 
 Invoke-Checked -Name 'Helper 自检' -FilePath $script:Helper -Arguments @('-SelfTest') | Out-Null
 Invoke-Checked -Name '主程序自检' -FilePath $script:Main -Arguments @('-SelfTest') | Out-Null
+Invoke-Checked -Name '界面布局自检' -FilePath $script:Main -Arguments @('-LayoutTest') | Out-Null
 Invoke-Checked -Name '发现协议测试' -FilePath (Join-Path $PSScriptRoot 'Test-Discovery.ps1') -Arguments @() | Out-Null
 
 # ---------------------------------------------------------------------------
