@@ -1,0 +1,16 @@
+# 运行时生成的测试/状态数据
+.testdata/
+.teststate/
+.testshare/
+
+# 日志
+*.log
+
+# 打包产物
+LanLink-v*.zip
+
+# 系统与编辑器
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

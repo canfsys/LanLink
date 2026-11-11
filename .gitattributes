@@ -1,0 +1,7 @@
+# Windows PowerShell 5.1 需要 UTF-8 BOM 才能正确显示中文。
+# 将 .ps1/.cmd 视为二进制，避免 git 换行符或编码转换破坏文件。
+*.ps1 -text
+*.cmd -text
+
+*.md text eol=lf
+*.zip binary
